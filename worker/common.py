@@ -34,11 +34,15 @@ def kode(order_id):
 
 
 def push(conn, order_id, audience, tipe, judul, isi, dedupe=None):
-    """Tulis notifikasi. Sama seperti notify::push di server Rust (pembeli = pending, staf = skip)."""
+    """Tulis notifikasi. Sama seperti notify::push di server Rust (pembeli = pending, staf = skip).
+
+    Mengembalikan jumlah baris yang benar-benar ditulis: 0 kalau dedupe_key sudah ada.
+    """
     ext = "pending" if audience == "pembeli" else "skip"
-    conn.execute(
+    cur = conn.execute(
         """INSERT OR IGNORE INTO notifications
            (order_id, audience, tipe, judul, isi, dedupe_key, ext_status, created_at)
            VALUES (?,?,?,?,?,?,?,?)""",
         (order_id, audience, tipe, judul, isi, dedupe, ext, now()),
     )
+    return cur.rowcount

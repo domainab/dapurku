@@ -5,7 +5,7 @@ use crate::util::*;
 use crate::{sse, App};
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap},
     response::{IntoResponse, Response, Sse},
     Json,
@@ -15,6 +15,7 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 type S = Arc<App>;
@@ -175,13 +176,34 @@ pub async fn meja_qr(State(s): State<S>, headers: HeaderMap, Path(no): Path<Stri
             return Err(not_found("meja tidak ditemukan"));
         }
     }
-    let base = if !s.cfg.base_url.is_empty() {
-        s.cfg.base_url.clone()
+    let base = base_publik(&s.cfg, &headers);
+    qr_svg(&format!("{}/?meja={}", base, no))
+}
+
+/// Alamat publik aplikasi untuk ditanam di QR meja. BASE_URL dipakai kalau ada.
+/// Kalau tidak, alamat disusun dari header Host; skemanya diambil dari
+/// X-Forwarded-Proto bila proxy dipercaya, karena memaksa http:// membuat QR
+/// yang dicetak mengarah ke alamat tidak terenkripsi di pemasangan HTTPS.
+fn base_publik(cfg: &crate::Config, headers: &HeaderMap) -> String {
+    if !cfg.base_url.is_empty() {
+        return cfg.base_url.trim_end_matches('/').to_string();
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:8080");
+    let skema = if cfg.trust_proxy {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim())
+            .filter(|v| *v == "https" || *v == "http")
+            .unwrap_or("http")
     } else {
-        let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost:8080");
-        format!("http://{host}")
+        "http"
     };
-    qr_svg(&format!("{}/?meja={}", base.trim_end_matches('/'), no))
+    format!("{skema}://{host}")
 }
 
 fn qr_svg(data: &str) -> R<Response> {
@@ -211,7 +233,7 @@ pub async fn simulate_pay(State(s): State<S>, Path(token): Path<String>) -> R<Js
 pub async fn customer_cancel(State(s): State<S>, Path(token): Path<String>) -> R<Json<Value>> {
     let conn = s.db.lock().unwrap();
     let id = order_id_by_token(&conn, &token)?;
-    orders::cancel(&conn, id, false)?;
+    orders::cancel(&conn, id, false, None)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -225,11 +247,11 @@ pub async fn panggil(State(s): State<S>, Path(token): Path<String>) -> R<Json<Va
         return Err(conflict("pesanan sudah tidak aktif"));
     }
     // dedupe per menit supaya tidak bisa di-spam
-    let dk = format!("{id}:panggil:{}", now() / 60);
+    let menit = now() / 60;
     push(&conn, Some(id), "kasir", "panggil_pelayan", &format!("Meja {meja} memanggil pelayan"),
-         &format!("#{}", kode(id)), Some(&dk))?;
+         &format!("#{}", kode(id)), Some(&format!("{id}:panggil:{menit}:kasir")))?;
     push(&conn, Some(id), "pembeli", "pelayan_dipanggil", "Pelayan dipanggil",
-         "Pelayan segera menuju mejamu.", Some(&dk))?;
+         "Pelayan segera menuju mejamu.", Some(&format!("{id}:panggil:{menit}:pembeli")))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -266,13 +288,25 @@ pub async fn webhook_qris(State(s): State<S>, headers: HeaderMap, body: Bytes) -
     if h.status != "PAID" {
         return Ok(Json(json!({ "ok": true, "diabaikan": true })));
     }
-    let id: i64 = h.kode.trim_start_matches("DPK-").parse().map_err(|_| bad("kode tidak valid"))?;
+    let kode_bersih = h.kode.trim();
+    let id: i64 = kode_bersih
+        .strip_prefix("DPK-")
+        .unwrap_or(kode_bersih)
+        .parse()
+        .map_err(|_| bad("kode tidak valid"))?;
     let conn = s.db.lock().unwrap();
-    let metode: String = conn
-        .query_row("SELECT metode FROM orders WHERE id = ?1", params![id], |r| r.get(0))
+    let (metode, total): (String, i64) = conn
+        .query_row("SELECT metode, total FROM orders WHERE id = ?1", params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .map_err(|_| not_found("pesanan tidak ditemukan"))?;
     if metode != "qris" {
         return Err(conflict("pesanan ini bukan pesanan QRIS"));
+    }
+    // Fix 3b: nominal harus sama persis. Kalau lebih besar, kelebihannya tidak
+    // tercatat di payments.jumlah (yang menyimpan total), jadi tolak daripada hilang.
+    if h.amount != total {
+        return Err(bad("jumlah bayar tidak sama dengan total pesanan"));
     }
     let baru = orders::mark_paid(&conn, id, "qris", h.amount, &format!("QRIS-{}", h.ref_), None, None, None)?;
     Ok(Json(json!({ "ok": true, "baru": baru })))
@@ -282,36 +316,89 @@ pub async fn webhook_qris(State(s): State<S>, headers: HeaderMap, body: Bytes) -
 
 #[derive(Deserialize)]
 pub struct Login {
-    role: String,
-    pin: String,
-    nama: Option<String>,
+    username: String,
+    password: String,
 }
 
-pub async fn login(State(s): State<S>, Json(b): Json<Login>) -> R<Response> {
-    let benar = match b.role.as_str() {
-        "kasir" => &s.cfg.pin_kasir,
-        "dapur" => &s.cfg.pin_dapur,
-        "admin" => &s.cfg.pin_admin,
-        _ => return Err(bad("role tidak dikenal")),
-    };
-    if !ct_eq(&b.pin, benar) {
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        return Err(AppError(axum::http::StatusCode::UNAUTHORIZED, "PIN salah".into()));
+/// Hash pembanding supaya username yang tidak ada tetap memakan waktu hitung
+/// yang mirip; tanpa ini, lama jawaban membocorkan username mana yang terdaftar.
+fn hash_umpan() -> &'static str {
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| crate::auth::hash_password("umpan"))
+}
+
+pub async fn login(
+    State(s): State<S>,
+    ConnectInfo(alamat): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(b): Json<Login>,
+) -> R<Response> {
+    let uname = b.username.trim().to_lowercase();
+
+    // Batasi percobaan yang gagal. Per username supaya satu akun tidak bisa
+    // ditebak terus-menerus, dan per IP supaya satu penebak tidak bisa
+    // menyapu banyak username sekaligus.
+    let ip = crate::auth::ip_klien(s.cfg.trust_proxy, &headers, alamat);
+    let kunci_u = format!("u:{uname}");
+    let kunci_ip = format!("ip:{ip}");
+    for (kunci, batas) in [
+        (&kunci_u, crate::auth::BATAS_USER),
+        (&kunci_ip, crate::auth::BATAS_IP),
+    ] {
+        if let Some(sisa) = crate::auth::sisa_kunci(&s.login_gagal, kunci, batas) {
+            return Err(too_many(&format!(
+                "terlalu banyak percobaan login, coba lagi dalam {} menit",
+                (sisa + 59) / 60
+            )));
+        }
     }
-    let nama: String = b.nama.unwrap_or_default().trim().chars().take(40).collect();
-    let nama = if nama.is_empty() { b.role.clone() } else { nama };
+
+    let akun: Option<(i64, String, String, String)> = {
+        let conn = s.db.lock().unwrap();
+        conn.query_row(
+            "SELECT id, pass_hash, role, nama FROM users WHERE username = ?1 AND aktif = 1",
+            params![uname],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok()
+    };
+    let salah = || AppError(axum::http::StatusCode::UNAUTHORIZED, "username atau password salah".into());
+    let (uid, hash, role, nama) = match akun {
+        Some(v) => v,
+        None => {
+            crate::auth::verify_password(hash_umpan(), &b.password);
+            crate::auth::catat_gagal(&s.login_gagal, &kunci_u);
+            crate::auth::catat_gagal(&s.login_gagal, &kunci_ip);
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            return Err(salah());
+        }
+    };
+    if !crate::auth::verify_password(&hash, &b.password) {
+        crate::auth::catat_gagal(&s.login_gagal, &kunci_u);
+        crate::auth::catat_gagal(&s.login_gagal, &kunci_ip);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        return Err(salah());
+    }
+    crate::auth::hapus_gagal(&s.login_gagal, &kunci_u);
+    crate::auth::hapus_gagal(&s.login_gagal, &kunci_ip);
     let token = format!("{}{}", rand_token(24), rand_token(24));
     let n = now();
     {
         let conn = s.db.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE expires_at < ?1", params![n])?;
         conn.execute(
-            "INSERT INTO sessions(token, role, nama, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![token, b.role, nama, n, n + 12 * 3600],
+            "INSERT INTO sessions(token, role, nama, created_at, expires_at, user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![token, role, nama, n, n + 12 * 3600, uid],
         )?;
+        conn.execute("UPDATE users SET last_login = ?2 WHERE id = ?1", params![uid, n])?;
     }
-    let ck = format!("dk_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200");
-    Ok(([(header::SET_COOKIE, ck)], Json(json!({ "ok": true, "role": b.role, "nama": nama }))).into_response())
+    let ck = crate::auth::cookie_sesi(&token, s.cfg.cookie_secure);
+    Ok((
+        [(header::SET_COOKIE, ck)],
+        Json(json!({ "ok": true, "role": role, "nama": nama, "username": uname })),
+    )
+        .into_response())
 }
 
 pub async fn logout(State(s): State<S>, headers: HeaderMap) -> R<Response> {
@@ -319,10 +406,81 @@ pub async fn logout(State(s): State<S>, headers: HeaderMap) -> R<Response> {
         let conn = s.db.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE token = ?1", params![tok])?;
     }
-    let ck = "dk_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
+    let ck = crate::auth::cookie_hapus(s.cfg.cookie_secure);
     Ok(([(header::SET_COOKIE, ck)], Json(json!({ "ok": true }))).into_response())
 }
 
 pub async fn me(auth: Auth) -> Json<Value> {
-    Json(json!({ "role": auth.role, "nama": auth.nama }))
+    Json(json!({ "role": auth.role, "nama": auth.nama, "username": auth.username }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(base_url: &str, trust_proxy: bool) -> crate::Config {
+        crate::Config {
+            web_dir: "../web".into(),
+            sim: true,
+            webhook_secret: "x".into(),
+            tz: 420,
+            base_url: base_url.into(),
+            trust_proxy,
+            cookie_secure: false,
+        }
+    }
+
+    fn headers(pasangan: &[(&str, &str)]) -> HeaderMap {
+        use axum::http::HeaderName;
+        let mut h = HeaderMap::new();
+        for (k, v) in pasangan {
+            h.insert(HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn base_url_dipakai_kalau_diset() {
+        let h = headers(&[("host", "localhost:8080")]);
+        assert_eq!(
+            base_publik(&cfg("https://dapurku.example.id", false), &h),
+            "https://dapurku.example.id"
+        );
+    }
+
+    #[test]
+    fn garis_miring_di_ujung_base_url_dibuang() {
+        let h = headers(&[]);
+        assert_eq!(
+            base_publik(&cfg("https://dapurku.example.id/", false), &h),
+            "https://dapurku.example.id"
+        );
+    }
+
+    #[test]
+    fn tanpa_base_url_memakai_host_dan_http() {
+        let h = headers(&[("host", "192.168.1.10:8080")]);
+        assert_eq!(base_publik(&cfg("", false), &h), "http://192.168.1.10:8080");
+    }
+
+    #[test]
+    fn skema_https_diambil_dari_proxy_yang_dipercaya() {
+        let h = headers(&[("host", "dapurku.example.id"), ("x-forwarded-proto", "https")]);
+        assert_eq!(base_publik(&cfg("", true), &h), "https://dapurku.example.id");
+        // rantai proxy: ambil yang pertama
+        let h2 = headers(&[("host", "dapurku.example.id"), ("x-forwarded-proto", "https, http")]);
+        assert_eq!(base_publik(&cfg("", true), &h2), "https://dapurku.example.id");
+    }
+
+    #[test]
+    fn header_proxy_diabaikan_kalau_proxy_tidak_dipercaya() {
+        let h = headers(&[("host", "dapurku.example.id"), ("x-forwarded-proto", "https")]);
+        assert_eq!(base_publik(&cfg("", false), &h), "http://dapurku.example.id");
+    }
+
+    #[test]
+    fn skema_aneh_dari_proxy_tidak_dipakai() {
+        let h = headers(&[("host", "dapurku.example.id"), ("x-forwarded-proto", "javascript")]);
+        assert_eq!(base_publik(&cfg("", true), &h), "http://dapurku.example.id");
+    }
 }

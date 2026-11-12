@@ -1,0 +1,3 @@
+Folder ini sengaja dikosongkan di repo.
+Server membuat dapurku.db di sini saat pertama dijalankan; berkas database
+tidak ikut di-commit (lihat .gitignore) karena isinya data operasional.

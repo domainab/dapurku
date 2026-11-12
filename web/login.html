@@ -9,9 +9,6 @@
 <style>
   main { min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 20px; }
   form { width: min(400px, 100%); background: #fff; border: 1px solid var(--line); border-radius: 32px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
-  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 4px; border-radius: 999px; background: var(--bg); }
-  .seg button { height: 44px; border-radius: 999px; border: none; background: transparent; font-weight: 600; font-size: 14px; }
-  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
   .err { color: var(--red-ink); font-size: 13px; font-weight: 600; min-height: 18px; }
 </style>
 </head>
@@ -19,35 +16,33 @@
 <main>
   <form id="f">
     <div><span class="display" style="font-size:26px;font-weight:800;letter-spacing:-.8px">dapurku.</span><div class="muted" style="font-size:14px;margin-top:2px">Masuk untuk staf</div></div>
-    <div class="seg" role="group" aria-label="Peran">
-      <button type="button" data-r="kasir" aria-pressed="true">Kasir</button>
-      <button type="button" data-r="dapur" aria-pressed="false">Dapur</button>
-      <button type="button" data-r="admin" aria-pressed="false">Admin</button>
-    </div>
-    <div><label class="lbl" for="nama">Nama</label><input id="nama" class="field" autocomplete="name" maxlength="40" placeholder="Nama kamu"></div>
-    <div><label class="lbl" for="pin">PIN</label><input id="pin" class="field" type="password" inputmode="numeric" autocomplete="current-password" required></div>
+    <div><label class="lbl" for="u">Username</label><input id="u" class="field" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required></div>
+    <div><label class="lbl" for="p">Password</label><input id="p" class="field" type="password" autocomplete="current-password" maxlength="200" required></div>
     <div class="err" id="err" role="alert"></div>
-    <button class="btn" type="submit">Masuk</button>
+    <button class="btn" type="submit" id="go">Masuk</button>
   </form>
 </main>
 <script src="/js/common.js"></script>
 <script>
 (function () {
-  var role = 'kasir', $ = function (i) { return document.getElementById(i); };
-  var HOME = { kasir: '/kasir.html', dapur: '/dapur.html', admin: '/admin.html' };
-  document.querySelector('.seg').addEventListener('click', function (e) {
-    var b = e.target.closest('[data-r]'); if (!b) return;
-    role = b.dataset.r;
-    document.querySelectorAll('.seg button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); });
-  });
-  $('nama').value = DK.ls.get('dk.nama', '');
+  var $ = function (i) { return document.getElementById(i); };
+  var HOME = { kasir: '/kasir', dapur: '/dapur', admin: '/admin' };
+  $('u').value = DK.ls.get('dk.username', '');
+  if ($('u').value) $('p').focus();
   $('f').addEventListener('submit', function (e) {
-    e.preventDefault(); $('err').textContent = '';
-    DK.api('/api/login', { body: { role: role, pin: $('pin').value, nama: $('nama').value } }).then(function (r) {
-      DK.ls.set('dk.nama', $('nama').value);
+    e.preventDefault();
+    $('err').textContent = '';
+    $('go').disabled = true;
+    DK.api('/api/login', { body: { username: $('u').value, password: $('p').value } }).then(function (r) {
+      DK.ls.set('dk.username', r.username);
       var next = DK.q('next');
       location.href = next && next.charAt(0) === '/' && next.charAt(1) !== '/' ? next : HOME[r.role];
-    }).catch(function (er) { $('err').textContent = er.message; $('pin').select(); });
+    }).catch(function (er) {
+      $('go').disabled = false;
+      $('err').textContent = er.message;
+      $('p').value = '';
+      $('p').focus();
+    });
   });
 })();
 </script>

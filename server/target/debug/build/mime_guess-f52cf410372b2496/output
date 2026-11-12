@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=C:\Kuliah\Pemrogaman Komputer\dapurku\server\target\debug\build\mime_guess-f52cf410372b2496\out\mime_types_generated.rs

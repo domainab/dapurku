@@ -140,14 +140,21 @@ pub async fn kasir(State(s): State<S>, auth: Auth) -> R<Json<Value>> {
     let conn = s.db.lock().unwrap();
     let n = now();
     let d0 = day_start(n, s.cfg.tz);
+    // Fix B + C: omzet bersih = pembayaran dikurangi pengembalian dana, memakai
+    // rumus yang sama persis dengan layar admin supaya kedua angka tidak berbeda.
     let sum = |m: &str| -> rusqlite::Result<i64> {
         conn.query_row(
-            "SELECT COALESCE(SUM(jumlah),0) FROM payments WHERE metode = ?1 AND created_at >= ?2",
+            "SELECT (SELECT COALESCE(SUM(jumlah),0) FROM payments WHERE metode = ?1 AND created_at >= ?2)
+                  - (SELECT COALESCE(SUM(jumlah),0) FROM refunds  WHERE metode = ?1 AND created_at >= ?2)",
             params![m, d0], |r| r.get(0),
         )
     };
     let qris = sum("qris")?;
     let tunai = sum("tunai")?;
+    let refund: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(jumlah),0) FROM refunds WHERE created_at >= ?1",
+        params![d0], |r| r.get(0),
+    )?;
     let aktif: i64 = conn.query_row("SELECT COUNT(*) FROM orders WHERE status IN ('baru','dimasak','siap')", [], |r| r.get(0))?;
     let menunggu: i64 = conn.query_row("SELECT COUNT(*) FROM orders WHERE status = 'menunggu_bayar'", [], |r| r.get(0))?;
 
@@ -182,7 +189,7 @@ pub async fn kasir(State(s): State<S>, auth: Auth) -> R<Json<Value>> {
         meja.push(json!({ "no": no, "state": state, "info": info }));
     }
     Ok(Json(json!({
-        "stat": { "qris": qris, "tunai": tunai, "aktif": aktif, "menunggu": menunggu },
+        "stat": { "qris": qris, "tunai": tunai, "aktif": aktif, "menunggu": menunggu, "refund": refund },
         "meja": meja,
         "nama": auth.nama,
     })))
@@ -221,7 +228,11 @@ pub async fn bayar_tunai(State(s): State<S>, auth: Auth, Path(id): Path<i64>, Js
     if b.uang < total {
         return Err(bad("uang yang diterima kurang dari total"));
     }
-    orders::mark_paid(&conn, id, "tunai", b.uang, &format!("CASH-{id}"), Some(b.uang), Some(b.uang - total), Some(auth.nama.as_str()))?;
+    let baru = orders::mark_paid(&conn, id, "tunai", b.uang, &format!("CASH-{id}"), Some(b.uang), Some(b.uang - total), Some(auth.nama.as_str()))?;
+    if !baru {
+        // Sudah lunas sebelumnya. Jangan balas sukses: kasir bisa menyerahkan kembalian dua kali.
+        return Err(conflict("pesanan ini sudah lunas"));
+    }
     Ok(Json(json!({ "ok": true, "kembalian": b.uang - total })))
 }
 
@@ -232,14 +243,17 @@ pub async fn konfirmasi_qris(State(s): State<S>, auth: Auth, Path(id): Path<i64>
     let total: i64 = conn
         .query_row("SELECT total FROM orders WHERE id = ?1", params![id], |r| r.get(0))
         .map_err(|_| not_found("pesanan tidak ditemukan"))?;
-    orders::mark_paid(&conn, id, "qris", total, &format!("MANUAL-{id}"), None, None, Some(auth.nama.as_str()))?;
+    let baru = orders::mark_paid(&conn, id, "qris", total, &format!("MANUAL-{id}"), None, None, Some(auth.nama.as_str()))?;
+    if !baru {
+        return Err(conflict("pesanan ini sudah lunas"));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn batal(State(s): State<S>, auth: Auth, Path(id): Path<i64>) -> R<Json<Value>> {
     auth.need(&["kasir"])?;
     let conn = s.db.lock().unwrap();
-    orders::cancel(&conn, id, true)?;
+    orders::cancel(&conn, id, true, Some(auth.nama.as_str()))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -267,10 +281,13 @@ fn ymd(t: i64, tz_min: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Omzet bersih satu periode: pembayaran dikurangi pengembalian dana yang terjadi
+/// di periode itu. Tidak memakai status pesanan, supaya pembatalan hari ini tidak
+/// mengubah angka hari kemarin yang sudah terlanjur dilaporkan.
 fn omzet_between(conn: &Connection, a: i64, b: i64) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT COALESCE(SUM(p.jumlah),0) FROM payments p JOIN orders o ON o.id = p.order_id
-          WHERE p.created_at >= ?1 AND p.created_at < ?2 AND o.status != 'batal'",
+        "SELECT (SELECT COALESCE(SUM(jumlah),0) FROM payments WHERE created_at >= ?1 AND created_at < ?2)
+              - (SELECT COALESCE(SUM(jumlah),0) FROM refunds  WHERE created_at >= ?1 AND created_at < ?2)",
         params![a, b], |r| r.get(0),
     )
 }
@@ -294,6 +311,8 @@ pub async fn ringkasan(State(s): State<S>, auth: Auth) -> R<Json<Value>> {
     let rata: Option<f64> = conn.query_row(
         "SELECT AVG(ready_at - cooking_at) FROM orders WHERE ready_at IS NOT NULL AND cooking_at IS NOT NULL AND created_at >= ?1",
         params![d0], |r| r.get(0))?;
+    let refund: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(jumlah),0) FROM refunds WHERE created_at >= ?1", params![d0], |r| r.get(0))?;
     let qris_n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM orders WHERE paid_at >= ?1 AND metode = 'qris' AND status != 'batal'", params![d0], |r| r.get(0))?;
     let tunai_n: i64 = conn.query_row(
@@ -317,7 +336,7 @@ pub async fn ringkasan(State(s): State<S>, auth: Auth) -> R<Json<Value>> {
         .query_map(params![d0], |r| Ok(json!({ "nama": r.get::<_, String>(0)?, "jml": r.get::<_, i64>(1)? })))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(json!({
-        "omzet": omzet, "naik_pct": naik_pct, "pesanan": pesanan, "aktif": aktif,
+        "omzet": omzet, "naik_pct": naik_pct, "pesanan": pesanan, "aktif": aktif, "refund": refund,
         "rata_masak": rata.map(|v| (v / 60.0).round() as i64).unwrap_or(0),
         "target_masak": setting_i(&conn, "target_masak", 15),
         "qris_n": qris_n, "tunai_n": tunai_n, "per_jam": per_jam, "laris": laris,
@@ -486,18 +505,23 @@ fn laporan_rows(conn: &Connection, tz: i64, hari: i64) -> rusqlite::Result<Vec<V
         let b = a + 86400;
         let per = |m: &str| -> rusqlite::Result<i64> {
             conn.query_row(
-                "SELECT COALESCE(SUM(p.jumlah),0) FROM payments p JOIN orders o ON o.id = p.order_id
-                  WHERE p.metode = ?1 AND p.created_at >= ?2 AND p.created_at < ?3 AND o.status != 'batal'",
+                "SELECT (SELECT COALESCE(SUM(jumlah),0) FROM payments WHERE metode = ?1 AND created_at >= ?2 AND created_at < ?3)
+                      - (SELECT COALESCE(SUM(jumlah),0) FROM refunds  WHERE metode = ?1 AND created_at >= ?2 AND created_at < ?3)",
                 params![m, a, b], |r| r.get(0),
             )
         };
         let qris = per("qris")?;
         let tunai = per("tunai")?;
+        let refund: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(jumlah),0) FROM refunds WHERE created_at >= ?1 AND created_at < ?2",
+            params![a, b], |r| r.get(0),
+        )?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM orders WHERE paid_at >= ?1 AND paid_at < ?2 AND status != 'batal'",
             params![a, b], |r| r.get(0),
         )?;
-        out.push(json!({ "tanggal": ymd(a, tz), "pesanan": n, "qris": qris, "tunai": tunai, "total": qris + tunai }));
+        out.push(json!({ "tanggal": ymd(a, tz), "pesanan": n, "qris": qris, "tunai": tunai,
+                         "refund": refund, "total": qris + tunai }));
     }
     Ok(out)
 }
@@ -517,11 +541,11 @@ pub async fn laporan_csv(State(s): State<S>, auth: Auth, Query(q): Query<HariQ>)
     auth.need(&[])?;
     let conn = s.db.lock().unwrap();
     let rows = laporan_rows(&conn, s.cfg.tz, q.hari.unwrap_or(30).clamp(1, 365))?;
-    let mut csv = String::from("tanggal,pesanan,omzet_qris,omzet_tunai,omzet_total\n");
+    let mut csv = String::from("tanggal,pesanan,omzet_qris,omzet_tunai,pengembalian,omzet_total\n");
     for r in rows {
         csv.push_str(&format!(
-            "{},{},{},{},{}\n",
-            r["tanggal"].as_str().unwrap_or(""), r["pesanan"], r["qris"], r["tunai"], r["total"]
+            "{},{},{},{},{},{}\n",
+            r["tanggal"].as_str().unwrap_or(""), r["pesanan"], r["qris"], r["tunai"], r["refund"], r["total"]
         ));
     }
     Ok((
@@ -532,6 +556,155 @@ pub async fn laporan_csv(State(s): State<S>, auth: Auth, Query(q): Query<HariQ>)
         csv,
     )
         .into_response())
+}
+
+// ---------- pengguna staf (admin) ----------
+
+#[derive(Deserialize)]
+pub struct UserIn {
+    username: Option<String>,
+    password: Option<String>,
+    role: Option<String>,
+    nama: Option<String>,
+    aktif: Option<bool>,
+}
+
+fn cek_username(u: &str) -> R<String> {
+    let u = u.trim().to_lowercase();
+    let bentuk_ok = u
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_');
+    if u.len() < 3 || u.len() > 32 || !bentuk_ok {
+        return Err(bad("username 3-32 karakter: huruf kecil, angka, titik, strip, garis bawah"));
+    }
+    Ok(u)
+}
+
+fn cek_password(p: &str) -> R<()> {
+    if p.chars().count() < 8 {
+        return Err(bad("password minimal 8 karakter"));
+    }
+    if p.len() > 200 {
+        return Err(bad("password terlalu panjang"));
+    }
+    Ok(())
+}
+
+fn cek_role(r: &str) -> R<()> {
+    if !["kasir", "dapur", "admin"].contains(&r) {
+        return Err(bad("role harus kasir, dapur, atau admin"));
+    }
+    Ok(())
+}
+
+fn cek_nama(n: &str) -> R<String> {
+    let n: String = n.trim().chars().take(40).collect();
+    if n.is_empty() {
+        return Err(bad("nama wajib diisi"));
+    }
+    Ok(n)
+}
+
+/// Jumlah admin aktif selain `kecuali`. Dipakai supaya admin terakhir tidak bisa
+/// menonaktifkan atau menurunkan dirinya sendiri sampai tidak ada yang bisa masuk.
+fn admin_aktif_lain(conn: &Connection, kecuali: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND aktif = 1 AND id != ?1",
+        params![kecuali],
+        |r| r.get(0),
+    )
+}
+
+pub async fn users_list(State(s): State<S>, auth: Auth) -> R<Json<Value>> {
+    auth.need(&[])?;
+    let conn = s.db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, username, role, nama, aktif, created_at, last_login FROM users ORDER BY role, username",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "id": r.get::<_, i64>(0)?, "username": r.get::<_, String>(1)?,
+                "role": r.get::<_, String>(2)?, "nama": r.get::<_, String>(3)?,
+                "aktif": r.get::<_, i64>(4)? == 1, "created_at": r.get::<_, i64>(5)?,
+                "last_login": r.get::<_, Option<i64>>(6)?,
+            }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(json!(rows)))
+}
+
+pub async fn user_create(State(s): State<S>, auth: Auth, Json(b): Json<UserIn>) -> R<Json<Value>> {
+    auth.need(&[])?;
+    let username = cek_username(&b.username.unwrap_or_default())?;
+    let password = b.password.unwrap_or_default();
+    cek_password(&password)?;
+    let role = b.role.unwrap_or_default();
+    cek_role(&role)?;
+    let nama = cek_nama(&b.nama.unwrap_or_default())?;
+    let conn = s.db.lock().unwrap();
+    let ada: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE username = ?1",
+        params![username],
+        |r| r.get(0),
+    )?;
+    if ada > 0 {
+        return Err(conflict("username sudah dipakai"));
+    }
+    conn.execute(
+        "INSERT INTO users(username, pass_hash, role, nama, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![username, crate::auth::hash_password(&password), role, nama, now()],
+    )?;
+    Ok(Json(json!({ "ok": true, "id": conn.last_insert_rowid() })))
+}
+
+pub async fn user_update(State(s): State<S>, auth: Auth, Path(id): Path<i64>, Json(b): Json<UserIn>) -> R<Json<Value>> {
+    auth.need(&[])?;
+    let conn = s.db.lock().unwrap();
+    let (role_kini, aktif_kini): (String, i64) = conn
+        .query_row("SELECT role, aktif FROM users WHERE id = ?1", params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(|_| not_found("pengguna tidak ditemukan"))?;
+
+    let role_baru = match &b.role {
+        Some(r) => {
+            cek_role(r)?;
+            r.clone()
+        }
+        None => role_kini.clone(),
+    };
+    let aktif_baru = b.aktif.unwrap_or(aktif_kini == 1);
+    let masih_admin_aktif = role_baru == "admin" && aktif_baru;
+    if role_kini == "admin" && aktif_kini == 1 && !masih_admin_aktif && admin_aktif_lain(&conn, id)? == 0 {
+        return Err(conflict("harus ada minimal satu admin yang aktif"));
+    }
+
+    if let Some(n) = &b.nama {
+        let n = cek_nama(n)?;
+        conn.execute("UPDATE users SET nama = ?2 WHERE id = ?1", params![id, n])?;
+    }
+    conn.execute(
+        "UPDATE users SET role = ?2, aktif = ?3 WHERE id = ?1",
+        params![id, role_baru, aktif_baru as i64],
+    )?;
+    if let Some(p) = &b.password {
+        cek_password(p)?;
+        conn.execute(
+            "UPDATE users SET pass_hash = ?2, pass_bawaan = 0 WHERE id = ?1",
+            params![id, crate::auth::hash_password(p)],
+        )?;
+    }
+    // Ganti password, ganti role, atau dinonaktifkan: sesi lama tidak boleh dipakai
+    // lagi. Sesi yang sedang dipakai untuk permintaan ini dikecualikan, supaya admin
+    // yang mengganti password dirinya sendiri tidak langsung terlempar keluar.
+    if b.password.is_some() || role_baru != role_kini || !aktif_baru {
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
+            params![id, auth.token],
+        )?;
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 const SETTING_KEYS: [(&str, bool); 6] = [

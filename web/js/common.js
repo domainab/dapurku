@@ -160,13 +160,13 @@
   DK.requireLogin = function () {
     return DK.api('/api/me').catch(function (e) {
       if (e.status === 401) {
-        location.href = '/login.html?next=' + encodeURIComponent(location.pathname);
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
       }
       throw e;
     });
   };
   DK.logout = function () {
-    return DK.api('/api/logout', { method: 'POST', body: {} }).then(function () { location.href = '/login.html'; });
+    return DK.api('/api/logout', { method: 'POST', body: {} }).then(function () { location.href = '/login'; });
   };
 
   DK.icons = {

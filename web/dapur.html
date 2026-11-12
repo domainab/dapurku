@@ -73,7 +73,7 @@
       $('nb').textContent = d.baru.length; $('nm').textContent = d.masak.length; $('ns').textContent = d.siap.length;
       $('avg').textContent = d.stat.rata_masak ? d.stat.rata_masak + ' mnt' : '-';
       $('done').textContent = d.stat.selesai_hari_ini;
-    }).catch(function (e) { if (e.status === 401 || e.status === 403) location.href = '/login.html?next=/dapur.html'; });
+    }).catch(function (e) { if (e.status === 401 || e.status === 403) location.href = '/login?next=/dapur'; });
   }
   function clock() { var d = new Date(); $('clock').textContent = String(d.getHours()).padStart(2, '0') + '.' + String(d.getMinutes()).padStart(2, '0'); }
   clock(); setInterval(clock, 10000);
@@ -88,7 +88,8 @@
     DK.api('/api/staff/orders/' + b.dataset.id + '/status', { body: { to: b.dataset.to } }).then(load).catch(function (er) { DK.toast({ judul: 'Gagal', isi: er.message }); load(); });
   });
 
-  DK.requireLogin().then(function () {
+  DK.requireLogin().then(function (me) {
+    if (me.role !== 'dapur' && me.role !== 'admin') { location.href = '/login?next=/dapur'; return; }
     load(); setInterval(load, 5000);
     DK.listen('/api/staff/events', function (n) {
       if (n.tipe === 'pesanan_baru') { DK.chime(); DK.toast({ judul: n.judul, isi: n.isi }); }

@@ -1,0 +1,12 @@
+# Artefak build Rust
+/server/target/
+
+# Database SQLite: data operasional, jangan ikut di repo.
+# Server membuatnya sendiri saat pertama dijalankan.
+/data/*.db
+/data/*.db-wal
+/data/*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]

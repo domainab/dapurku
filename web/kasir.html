@@ -143,7 +143,7 @@
         loadSide();
       }
       renderStats(); renderOrders();
-    }).catch(function (e) { if (e.status === 401 || e.status === 403) location.href = '/login.html?next=/kasir.html'; });
+    }).catch(function (e) { if (e.status === 401 || e.status === 403) location.href = '/login?next=/kasir'; });
   }
 
   $('filters').addEventListener('click', function (e) {
@@ -180,7 +180,7 @@
     if (u) { uang = +u.dataset.u; loadSide(); return; }
     if (!a) return;
     var act = a.dataset.a, id = selId, p;
-    if (act === 'struk') { window.open('/struk.html?id=' + id, '_blank'); return; }
+    if (act === 'struk') { window.open('/struk?id=' + id, '_blank'); return; }
     if (act === 'batal') { if (!confirm('Batalkan pesanan ini?')) return; p = DK.api('/api/staff/orders/' + id + '/batal', { body: {} }); }
     else if (act === 'tunai') p = DK.api('/api/staff/orders/' + id + '/bayar-tunai', { body: { uang: uang } });
     else if (act === 'qris') p = DK.api('/api/staff/orders/' + id + '/konfirmasi-qris', { body: {} });
@@ -202,7 +202,8 @@
     document.body.appendChild(bd);
   });
 
-  DK.requireLogin().then(function () {
+  DK.requireLogin().then(function (me) {
+    if (me.role !== 'kasir' && me.role !== 'admin') { location.href = '/login?next=/kasir'; return; }
     load(); setInterval(function () { load().then(function () { if (!document.activeElement || document.activeElement.id !== 'uang') loadSide(); }); }, 6000);
     DK.listen('/api/staff/events', function (n) {
       DK.chime(); DK.toast({ judul: n.judul, isi: n.isi });

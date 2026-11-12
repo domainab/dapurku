@@ -97,7 +97,7 @@
     $('kodeLine').textContent = 'Total bayar · #' + o.kode;
 
     if (o.status === 'baru' || o.status === 'dimasak' || o.status === 'siap' || o.status === 'selesai') {
-      location.replace('/status.html?o=' + encodeURIComponent(token));
+      location.replace('/status?o=' + encodeURIComponent(token));
       return;
     }
     if (o.status === 'batal' || o.status === 'kedaluwarsa') {
@@ -130,7 +130,7 @@
   refresh().then(function () {
     timer = setInterval(tick, 1000);
     setInterval(refresh, 4000); // cadangan kalau SSE terputus
-    es = DK.watchOrder(token, { href: '/status.html?o=' + encodeURIComponent(token), onNotif: function (n) {
+    es = DK.watchOrder(token, { href: '/status?o=' + encodeURIComponent(token), onNotif: function (n) {
       if (n.tipe === 'pembayaran_berhasil' || n.tipe === 'pesanan_dibatalkan') refresh();
     } });
   });

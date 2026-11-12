@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
 
+-- Pengembalian dana saat pesanan yang sudah lunas dibatalkan. Dicatat terpisah
+-- supaya omzet hari pembayaran tidak berubah surut; laporan memakai
+-- payments dikurangi refunds pada periode masing-masing.
+CREATE TABLE IF NOT EXISTS refunds (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id   INTEGER NOT NULL REFERENCES orders(id),
+  metode     TEXT    NOT NULL,
+  jumlah     INTEGER NOT NULL,
+  alasan     TEXT    NOT NULL DEFAULT '',
+  kasir      TEXT,
+  ref        TEXT    NOT NULL UNIQUE,         -- idempoten: satu pembatalan satu baris
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_refunds_created ON refunds(created_at);
+
 -- Antrean notifikasi. Server Rust dan worker Python sama-sama menulis ke sini.
 -- audience: pembeli | dapur | kasir.  ext_status dipakai worker untuk kanal luar.
 CREATE TABLE IF NOT EXISTS notifications (
@@ -95,10 +110,26 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notif_order ON notifications(order_id, id);
 CREATE INDEX IF NOT EXISTS idx_notif_aud   ON notifications(audience, id);
 
+-- Akun staf. Login memakai username + password (hash Argon2id, bukan PIN bersama).
+CREATE TABLE IF NOT EXISTS users (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  username   TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+  pass_hash  TEXT    NOT NULL,
+  role       TEXT    NOT NULL CHECK (role IN ('kasir','dapur','admin')),
+  nama       TEXT    NOT NULL,
+  aktif      INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  last_login INTEGER,
+  -- 1 = password masih bawaan hasil seeding. Mode live menolak jalan selama
+  -- masih ada akun aktif bertanda ini.
+  pass_bawaan INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT PRIMARY KEY,
   role       TEXT NOT NULL CHECK (role IN ('kasir','dapur','admin')),
   nama       TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  user_id    INTEGER REFERENCES users(id)
 );

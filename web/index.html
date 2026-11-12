@@ -112,7 +112,7 @@
     if (!t) { h.hidden = true; return; }
     var n = DK.cart.qtyOf(t.id);
     h.hidden = false;
-    h.href = '/detail.html?id=' + t.id;
+    h.href = '/detail?id=' + t.id;
     h.setAttribute('aria-label', 'Lihat ' + t.nama);
     h.innerHTML = '<div class="photo">' + photo(t, '[FOTO]') + '</div>' +
       '<div style="display:flex;flex-direction:column;gap:6px;position:relative;max-width:200px"><span style="align-self:flex-start;padding:4px 10px;border-radius:999px;background:var(--lime);color:var(--ink);font-size:11px;font-weight:700">Terlaris hari ini</span>' +
@@ -143,9 +143,9 @@
       if (m.tersedia) {
         add = simple(m)
           ? '<button type="button" class="add" data-add="' + m.id + '" aria-label="Tambah ' + DK.esc(m.nama) + '">' + DK.icons.plus + '</button>'
-          : '<a class="add" href="/detail.html?id=' + m.id + '" aria-label="Atur dan tambah ' + DK.esc(m.nama) + '">' + DK.icons.plus + '</a>';
+          : '<a class="add" href="/detail?id=' + m.id + '" aria-label="Atur dan tambah ' + DK.esc(m.nama) + '">' + DK.icons.plus + '</a>';
       }
-      var link = m.tersedia ? 'href="/detail.html?id=' + m.id + '"' : '';
+      var link = m.tersedia ? 'href="/detail?id=' + m.id + '"' : '';
       return '<div class="card' + (m.tersedia ? '' : ' habis') + '">' +
         '<div class="photo">' + (m.tersedia ? '<a ' + link + ' aria-label="Lihat ' + DK.esc(m.nama) + '" style="position:absolute;inset:0"></a>' : '') + inner + badge + qty + add + '</div>' +
         '<div style="display:flex;flex-direction:column;gap:2px;padding:0 4px"><span class="name">' + DK.esc(m.nama) + '</span><span class="price">' + DK.rp(m.harga) + '</span></div></div>';
@@ -197,7 +197,7 @@
     } }).then(function (r) {
       DK.cart.clear();
       DK.setActiveOrder({ token: r.token, kode: r.order.kode });
-      location.href = (r.order.metode === 'tunai' ? '/status.html' : '/bayar.html') + '?o=' + encodeURIComponent(r.token);
+      location.href = (r.order.metode === 'tunai' ? '/status' : '/bayar') + '?o=' + encodeURIComponent(r.token);
     }).catch(function (e) {
       btn.disabled = false;
       if (errEl) errEl.textContent = e.message; else alert(e.message);
@@ -245,7 +245,7 @@
       if (!aktif) { DK.setActiveOrder(null); return; }
       var b = $('banner');
       b.hidden = false;
-      b.href = (o.status === 'menunggu_bayar' && o.metode === 'qris' ? '/bayar.html' : '/status.html') + '?o=' + encodeURIComponent(ao.token);
+      b.href = (o.status === 'menunggu_bayar' && o.metode === 'qris' ? '/bayar' : '/status') + '?o=' + encodeURIComponent(ao.token);
       b.innerHTML = '<span>Pesanan <b>#' + DK.esc(o.kode) + '</b> sedang berjalan</span><span style="display:flex;align-items:center;gap:6px">Lihat status ' + DK.icons.arrow + '</span>';
       DK.watchOrder(ao.token, { href: b.href });
     }).catch(function () { DK.setActiveOrder(null); });

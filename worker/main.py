@@ -18,8 +18,9 @@ def main():
             r = jobs.remind_payment(conn)
             l = jobs.late_alerts(conn)
             s = jobs.dispatch_outbox(conn)
-            if e:
-                print(f"[worker] {e} pesanan kedaluwarsa", flush=True)
+            if e or r or l or s:
+                print(f"[worker] kedaluwarsa={e} pengingat={r} telat={l} notif_diteruskan={s}",
+                      flush=True)
         except Exception as ex:  # DB belum ada / terkunci: coba lagi nanti
             print(f"[worker] error: {ex}", flush=True)
             conn = None

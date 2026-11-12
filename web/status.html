@@ -98,7 +98,7 @@
     // teks besar
     var lead = '', big = '', color = 'var(--lime)';
     if (s === 'menunggu_bayar') {
-      if (o.metode === 'qris') { location.replace('/bayar.html?o=' + encodeURIComponent(token)); return; }
+      if (o.metode === 'qris') { location.replace('/bayar?o=' + encodeURIComponent(token)); return; }
       lead = 'Bayar tunai ke kasir sebesar'; big = DK.rp(o.total); color = 'var(--amber)';
       $('big').style.fontSize = '44px';
     } else if (s === 'baru') { lead = 'Pesanan antre di dapur, siap dalam'; big = '± ' + o.estimasi_menit + ' mnt'; }

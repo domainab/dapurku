@@ -222,19 +222,34 @@ pub fn mark_paid(
     kasir: Option<&str>,
 ) -> R<bool> {
     let tx = conn.unchecked_transaction()?;
-    let (status, total, meja): (String, i64, String) = tx
+    let (status, total, meja, metode_pesanan, expires_at): (String, i64, String, String, i64) = tx
         .query_row(
-            "SELECT status, total, meja_no FROM orders WHERE id = ?1",
+            "SELECT status, total, meja_no, metode, expires_at FROM orders WHERE id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|_| not_found("pesanan tidak ditemukan"))?;
+
+    // Fix A: metode pembayaran tidak boleh ditimpa diam-diam. Tanpa penjagaan ini
+    // pesanan tunai bisa ditutup lewat "konfirmasi QRIS" tanpa ada uang masuk,
+    // dan kolom metode ikut berubah sehingga jejaknya hilang.
+    if metode_pesanan != metode {
+        return Err(conflict(&format!(
+            "pesanan ini dibayar {metode_pesanan}, bukan {metode}"
+        )));
+    }
 
     if status == "batal" || status == "kedaluwarsa" {
         return Err(conflict("pesanan sudah dibatalkan atau kedaluwarsa"));
     }
     if status != "menunggu_bayar" {
         return Ok(false);
+    }
+    // Fix E: batas waktu ditegakkan di sini juga, bukan hanya oleh worker.
+    // Kalau worker sedang mati, pesanan yang sudah lewat tenggat tetap tidak
+    // boleh dilunasi supaya tidak ada pembayaran untuk pesanan yang semestinya hangus.
+    if now() > expires_at {
+        return Err(conflict("waktu pembayaran pesanan ini sudah habis"));
     }
     if bayar < total {
         return Err(bad("jumlah bayar kurang dari total"));
@@ -247,10 +262,10 @@ pub fn mark_paid(
         return Ok(false);
     }
     tx.execute(
-        "UPDATE orders SET status = 'baru', paid_at = ?2, metode = ?3,
-                uang_diterima = ?4, kembalian = ?5, kasir = ?6
+        "UPDATE orders SET status = 'baru', paid_at = ?2,
+                uang_diterima = ?3, kembalian = ?4, kasir = ?5
          WHERE id = ?1",
-        params![id, now(), metode, uang, kembalian, kasir],
+        params![id, now(), uang, kembalian, kasir],
     )?;
 
     let k = kode(id);
@@ -342,10 +357,12 @@ pub fn advance_status(conn: &Connection, id: i64, to: &str) -> R<()> {
 
 /// Batalkan pesanan. `oleh_staf` = true boleh membatalkan pesanan yang sudah lunas
 /// (pengembalian uang diurus manual oleh kasir).
-pub fn cancel(conn: &Connection, id: i64, oleh_staf: bool) -> R<()> {
+pub fn cancel(conn: &Connection, id: i64, oleh_staf: bool, kasir: Option<&str>) -> R<()> {
     let tx = conn.unchecked_transaction()?;
-    let status: String = tx
-        .query_row("SELECT status FROM orders WHERE id = ?1", params![id], |r| r.get(0))
+    let (status, metode): (String, String) = tx
+        .query_row("SELECT status, metode FROM orders WHERE id = ?1", params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .map_err(|_| not_found("pesanan tidak ditemukan"))?;
     let boleh = status == "menunggu_bayar"
         || (oleh_staf && (status == "baru" || status == "dimasak"));
@@ -361,6 +378,22 @@ pub fn cancel(conn: &Connection, id: i64, oleh_staf: bool) -> R<()> {
     )?;
     let k = kode(id);
     let sudah_bayar = status != "menunggu_bayar";
+    // Fix C: pembatalan pesanan yang sudah lunas menimbulkan utang pengembalian
+    // dana. Tanpa catatan ini uangnya hilang begitu saja dari pembukuan.
+    if sudah_bayar {
+        let dibayar: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(jumlah), 0) FROM payments WHERE order_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if dibayar > 0 {
+            tx.execute(
+                "INSERT OR IGNORE INTO refunds(order_id, metode, jumlah, alasan, kasir, ref, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, metode, dibayar, "pesanan dibatalkan", kasir, format!("REFUND-{id}"), now()],
+            )?;
+        }
+    }
     let isi = if sudah_bayar {
         format!("Pesanan #{k} dibatalkan oleh kasir. Silakan ke kasir untuk pengembalian dana.")
     } else {
@@ -382,5 +415,184 @@ pub fn estimasi_menit(status: &str, est: i64, cooking_at: Option<i64>) -> i64 {
             (est - lewat).max(1)
         }
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Database di memori dengan skema asli, satu meja, dan satu menu Rp18.000.
+    fn db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(include_str!("../../schema/schema.sql")).unwrap();
+        c.execute("INSERT INTO meja(no) VALUES ('01')", []).unwrap();
+        c.execute(
+            "INSERT INTO menu_items(nama, kategori, harga, waktu_masak) VALUES ('Nasi Goreng', 'Nasi', 18000, 10)",
+            [],
+        )
+        .unwrap();
+        c
+    }
+
+    fn pesanan(c: &Connection, metode: &str) -> i64 {
+        let o = NewOrder {
+            meja: "01".into(),
+            metode: metode.into(),
+            items: vec![NewItem { menu_id: 1, qty: 1, level: None, extras: vec![], catatan: None }],
+        };
+        create_order(c, &o).unwrap().0
+    }
+
+    fn status(c: &Connection, id: i64) -> String {
+        c.query_row("SELECT status FROM orders WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+    }
+
+    fn hitung(c: &Connection, sql: &str, id: i64) -> i64 {
+        c.query_row(sql, params![id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn harga_dihitung_ulang_di_server() {
+        let c = db();
+        c.execute("INSERT INTO menu_extras(menu_id, nama, harga) VALUES (1, 'Telur', 4000)", []).unwrap();
+        let o = NewOrder {
+            meja: "01".into(),
+            metode: "tunai".into(),
+            items: vec![NewItem { menu_id: 1, qty: 2, level: None, extras: vec![1], catatan: None }],
+        };
+        let (id, _) = create_order(&c, &o).unwrap();
+        // (18.000 + 4.000) x 2
+        assert_eq!(hitung(&c, "SELECT total FROM orders WHERE id = ?1", id), 44000);
+    }
+
+    #[test]
+    fn bayar_dua_kali_hanya_dihitung_sekali() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        assert!(mark_paid(&c, id, "tunai", 20000, "CASH-1", Some(20000), Some(2000), Some("ani")).unwrap());
+        // panggilan kedua tidak boleh berefek dan harus menjawab false
+        assert!(!mark_paid(&c, id, "tunai", 20000, "CASH-1", Some(20000), Some(2000), Some("ani")).unwrap());
+        assert_eq!(hitung(&c, "SELECT COUNT(*) FROM payments WHERE order_id = ?1", id), 1);
+    }
+
+    #[test]
+    fn metode_pembayaran_tidak_bisa_ditimpa() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        let e = mark_paid(&c, id, "qris", 18000, "MANUAL-1", None, None, Some("ani")).unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        let metode: String =
+            c.query_row("SELECT metode FROM orders WHERE id = ?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(metode, "tunai", "kolom metode tidak boleh berubah");
+        assert_eq!(status(&c, id), "menunggu_bayar");
+        assert_eq!(hitung(&c, "SELECT COUNT(*) FROM payments WHERE order_id = ?1", id), 0);
+    }
+
+    #[test]
+    fn pesanan_kedaluwarsa_tidak_bisa_dibayar() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        c.execute("UPDATE orders SET expires_at = 1 WHERE id = ?1", params![id]).unwrap();
+        let e = mark_paid(&c, id, "tunai", 18000, "CASH-1", Some(18000), Some(0), Some("ani")).unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        assert_eq!(hitung(&c, "SELECT COUNT(*) FROM payments WHERE order_id = ?1", id), 0);
+    }
+
+    #[test]
+    fn uang_kurang_dari_total_ditolak() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        let e = mark_paid(&c, id, "tunai", 17999, "CASH-1", Some(17999), Some(-1), Some("ani")).unwrap_err();
+        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pembatalan_pesanan_lunas_mencatat_pengembalian() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        mark_paid(&c, id, "tunai", 18000, "CASH-1", Some(18000), Some(0), Some("ani")).unwrap();
+        cancel(&c, id, true, Some("ani")).unwrap();
+        let (jumlah, metode, kasir): (i64, String, String) = c
+            .query_row(
+                "SELECT jumlah, metode, kasir FROM refunds WHERE order_id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(jumlah, 18000);
+        assert_eq!(metode, "tunai");
+        assert_eq!(kasir, "ani");
+        assert_eq!(status(&c, id), "batal");
+    }
+
+    #[test]
+    fn pembatalan_sebelum_bayar_tidak_mencatat_pengembalian() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        cancel(&c, id, false, None).unwrap();
+        assert_eq!(hitung(&c, "SELECT COUNT(*) FROM refunds WHERE order_id = ?1", id), 0);
+    }
+
+    #[test]
+    fn pesanan_tidak_bisa_dibatalkan_dua_kali() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        cancel(&c, id, false, None).unwrap();
+        let e = cancel(&c, id, true, Some("ani")).unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        assert_eq!(hitung(&c, "SELECT COUNT(*) FROM refunds WHERE order_id = ?1", id), 0);
+    }
+
+    #[test]
+    fn pesanan_batal_tidak_bisa_dibayar() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        cancel(&c, id, false, None).unwrap();
+        let e = mark_paid(&c, id, "tunai", 18000, "CASH-1", Some(18000), Some(0), Some("ani")).unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn status_harus_berurutan() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        mark_paid(&c, id, "tunai", 18000, "CASH-1", Some(18000), Some(0), Some("ani")).unwrap();
+        // lompat dari baru langsung ke siap tidak boleh
+        assert_eq!(advance_status(&c, id, "siap").unwrap_err().0, StatusCode::CONFLICT);
+        advance_status(&c, id, "dimasak").unwrap();
+        advance_status(&c, id, "siap").unwrap();
+        advance_status(&c, id, "selesai").unwrap();
+        assert_eq!(status(&c, id), "selesai");
+        assert_eq!(advance_status(&c, id, "selesai").unwrap_err().0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn notifikasi_pembeli_dan_dapur_terkirim_saat_lunas() {
+        let c = db();
+        let id = pesanan(&c, "tunai");
+        mark_paid(&c, id, "tunai", 18000, "CASH-1", Some(18000), Some(0), Some("ani")).unwrap();
+        for (aud, tipe) in [("pembeli", "pembayaran_berhasil"), ("dapur", "pesanan_baru"), ("kasir", "pembayaran_masuk")] {
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM notifications WHERE order_id = ?1 AND audience = ?2 AND tipe = ?3",
+                    params![id, aud, tipe],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "notifikasi {aud}/{tipe} harus ada tepat satu");
+        }
+    }
+
+    #[test]
+    fn menu_habis_tidak_bisa_dipesan() {
+        let c = db();
+        c.execute("UPDATE menu_items SET tersedia = 0 WHERE id = 1", []).unwrap();
+        let o = NewOrder {
+            meja: "01".into(),
+            metode: "tunai".into(),
+            items: vec![NewItem { menu_id: 1, qty: 1, level: None, extras: vec![], catatan: None }],
+        };
+        assert_eq!(create_order(&c, &o).unwrap_err().0, StatusCode::BAD_REQUEST);
     }
 }

@@ -48,14 +48,15 @@
     <a href="#meja" data-v="meja">Meja &amp; QR</a>
     <a href="#laporan" data-v="laporan">Laporan</a>
     <a href="#pengaturan" data-v="pengaturan">Pengaturan</a>
-    <a href="/kasir.html" style="margin-top:auto">Buka layar kasir</a>
-    <a href="/dapur.html">Buka layar dapur</a>
+    <a href="#pengguna" data-v="pengguna">Pengguna</a>
+    <a href="/kasir" style="margin-top:auto">Buka layar kasir</a>
+    <a href="/dapur">Buka layar dapur</a>
     <button type="button" id="out">Keluar</button>
   </nav>
   <main>
     <div class="row between" style="flex-wrap:wrap;align-items:flex-end;gap:16px">
       <div style="display:flex;flex-direction:column;gap:4px"><span class="muted" style="font-size:14px" id="tgl"></span><h1 class="display" id="judul" style="margin:0;font-size:36px;font-weight:800;letter-spacing:-1.2px">Ringkasan hari ini</h1></div>
-      <div class="row" style="gap:8px;flex-wrap:wrap"><a class="btn ghost" style="height:46px;font-size:14px" href="/qr-meja.html" target="_blank">Unduh QR semua meja</a><button type="button" class="btn" style="height:46px;font-size:14px" id="addMenu">+ Tambah menu</button></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap"><a class="btn ghost" style="height:46px;font-size:14px" href="/qr-meja" target="_blank">Unduh QR semua meja</a><button type="button" class="btn" style="height:46px;font-size:14px" id="addMenu">+ Tambah menu</button></div>
     </div>
 
     <section id="v-dashboard" style="display:flex;flex-direction:column;gap:20px">
@@ -87,7 +88,7 @@
 
     <section id="v-laporan" class="box" hidden>
       <div class="row between" style="flex-wrap:wrap;gap:10px"><span style="font-size:16px;font-weight:700">Laporan 7 hari terakhir</span><a class="btn ghost" style="height:40px;font-size:14px" href="/api/admin/laporan.csv?hari=30">Unduh CSV (30 hari)</a></div>
-      <div style="overflow-x:auto"><div style="min-width:520px" id="lapTbl"></div></div>
+      <div style="overflow-x:auto"><div style="min-width:620px" id="lapTbl"></div></div>
     </section>
 
     <section id="v-pengaturan" class="box" hidden>
@@ -103,6 +104,26 @@
         <button class="btn" type="submit">Simpan pengaturan</button>
       </form>
     </section>
+
+    <section id="v-pengguna" class="box" hidden>
+      <div class="row between" style="flex-wrap:wrap;gap:10px">
+        <span style="font-size:16px;font-weight:700">Pengguna staf</span>
+        <button type="button" class="btn" style="height:40px;font-size:14px" id="addUser">+ Tambah pengguna</button>
+      </div>
+      <form id="userForm" class="frow" style="max-width:460px;display:none">
+        <div class="row" style="gap:10px">
+          <div style="flex:1"><label class="lbl" for="u_username">Username</label><input class="field" id="u_username" maxlength="32" autocapitalize="none" spellcheck="false"></div>
+          <div style="flex:1"><label class="lbl" for="u_nama">Nama</label><input class="field" id="u_nama" maxlength="40"></div>
+        </div>
+        <div class="row" style="gap:10px">
+          <div style="flex:1"><label class="lbl" for="u_role">Role</label><select class="field" id="u_role"><option value="kasir">Kasir</option><option value="dapur">Dapur</option><option value="admin">Admin</option></select></div>
+          <div style="flex:1"><label class="lbl" for="u_pass">Password (min. 8)</label><input class="field" id="u_pass" type="password" autocomplete="new-password" maxlength="200"></div>
+        </div>
+        <div class="err" id="uErr" role="alert"></div>
+        <div class="row" style="gap:8px"><button class="btn" type="submit" style="height:44px;font-size:14px">Simpan</button><button type="button" class="btn ghost" id="uCancel" style="height:44px;font-size:14px">Batal</button></div>
+      </form>
+      <div style="overflow-x:auto"><div style="min-width:680px" id="userTbl"></div></div>
+    </section>
   </main>
 </div>
 <script src="/js/common.js"></script>
@@ -110,7 +131,7 @@
 (function () {
   var $ = function (i) { return document.getElementById(i); };
   var menu = [], mkat = '';
-  var TITLES = { dashboard: 'Ringkasan hari ini', pesanan: 'Pesanan', menu: 'Menu', meja: 'Meja & QR', laporan: 'Laporan', pengaturan: 'Pengaturan' };
+  var TITLES = { dashboard: 'Ringkasan hari ini', pesanan: 'Pesanan', menu: 'Menu', meja: 'Meja & QR', laporan: 'Laporan', pengaturan: 'Pengaturan', pengguna: 'Pengguna' };
   $('tgl').textContent = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   $('out').addEventListener('click', DK.logout);
 
@@ -120,9 +141,9 @@
     document.querySelectorAll('nav.side a[data-v]').forEach(function (a) { a.classList.toggle('on', a.dataset.v === v); });
     $('v-dashboard').hidden = v !== 'dashboard';
     $('v-menu').hidden = !(v === 'dashboard' || v === 'menu');
-    ['pesanan', 'meja', 'laporan', 'pengaturan'].forEach(function (x) { $('v-' + x).hidden = v !== x; });
+    ['pesanan', 'meja', 'laporan', 'pengaturan', 'pengguna'].forEach(function (x) { $('v-' + x).hidden = v !== x; });
     $('judul').textContent = TITLES[v];
-    ({ dashboard: loadDash, pesanan: loadOrders, menu: loadMenu, meja: loadMeja, laporan: loadLap, pengaturan: loadSet })[v]();
+    ({ dashboard: loadDash, pesanan: loadOrders, menu: loadMenu, meja: loadMeja, laporan: loadLap, pengaturan: loadSet, pengguna: loadUsers })[v]();
   }
   window.addEventListener('hashchange', view);
 
@@ -223,9 +244,9 @@
 
   function loadLap() {
     DK.api('/api/admin/laporan?hari=7').then(function (l) {
-      var cols = 'grid-template-columns:130px 90px 1fr 1fr 1fr';
-      $('lapTbl').innerHTML = '<div class="tbl h" style="' + cols + '"><span>Tanggal</span><span>Pesanan</span><span>QRIS</span><span>Tunai</span><span>Total</span></div>' + l.map(function (r) {
-        return '<div class="tbl" style="' + cols + '"><span>' + r.tanggal + '</span><span>' + r.pesanan + '</span><span>' + DK.rp(r.qris) + '</span><span>' + DK.rp(r.tunai) + '</span><b>' + DK.rp(r.total) + '</b></div>';
+      var cols = 'grid-template-columns:130px 90px 1fr 1fr 1fr 1fr';
+      $('lapTbl').innerHTML = '<div class="tbl h" style="' + cols + '"><span>Tanggal</span><span>Pesanan</span><span>QRIS</span><span>Tunai</span><span>Pengembalian</span><span>Total</span></div>' + l.map(function (r) {
+        return '<div class="tbl" style="' + cols + '"><span>' + r.tanggal + '</span><span>' + r.pesanan + '</span><span>' + DK.rp(r.qris) + '</span><span>' + DK.rp(r.tunai) + '</span><span class="muted">' + (r.refund ? '-' + DK.rp(r.refund) : '-') + '</span><b>' + DK.rp(r.total) + '</b></div>';
       }).join('');
     }).catch(authErr);
   }
@@ -236,9 +257,62 @@
     DK.api('/api/admin/settings', { method: 'PUT', body: b }).then(function () { $('setErr').textContent = ''; DK.toast({ judul: 'Tersimpan', isi: 'Pengaturan diperbarui.', ms: 3000 }); }).catch(function (er) { $('setErr').textContent = er.message; });
   });
 
-  function authErr(e) { if (e.status === 401 || e.status === 403) location.href = '/login.html?next=/admin.html'; }
+  var ROLES = { kasir: 'Kasir', dapur: 'Dapur', admin: 'Admin' };
+  var UCOLS = 'grid-template-columns:150px 1fr 110px 150px 90px 190px';
+  function loadUsers() {
+    DK.api('/api/admin/users').then(function (l) {
+      $('userTbl').innerHTML = '<div class="tbl h" style="' + UCOLS + '"><span>Username</span><span>Nama</span><span>Role</span><span>Terakhir masuk</span><span>Status</span><span></span></div>' + l.map(function (u) {
+        var masuk = u.last_login ? new Date(u.last_login * 1000).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) + ' ' + DK.jam(u.last_login) : 'belum pernah';
+        return '<div class="tbl" style="' + UCOLS + '">' +
+          '<b>' + DK.esc(u.username) + '</b>' +
+          '<span class="muted">' + DK.esc(u.nama) + '</span>' +
+          '<span>' + ROLES[u.role] + '</span>' +
+          '<span class="muted" style="font-size:13px">' + masuk + '</span>' +
+          '<span class="tag" style="background:var(--bg);justify-self:start">' + (u.aktif ? 'Aktif' : 'Nonaktif') + '</span>' +
+          '<span class="row" style="gap:6px"><button type="button" class="chip sm" data-pw="' + u.id + '">Ganti password</button>' +
+          '<button type="button" class="chip sm" data-akt="' + u.id + '" data-ke="' + (u.aktif ? '0' : '1') + '">' + (u.aktif ? 'Nonaktifkan' : 'Aktifkan') + '</button></span>' +
+          '</div>';
+      }).join('');
+    }).catch(authErr);
+  }
+  $('addUser').addEventListener('click', function () {
+    $('userForm').style.display = $('userForm').style.display === 'none' ? 'flex' : 'none';
+    $('uErr').textContent = '';
+  });
+  $('uCancel').addEventListener('click', function () { $('userForm').style.display = 'none'; });
+  $('userForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    $('uErr').textContent = '';
+    DK.api('/api/admin/users', { body: { username: $('u_username').value, nama: $('u_nama').value, role: $('u_role').value, password: $('u_pass').value } })
+      .then(function () {
+        ['u_username', 'u_nama', 'u_pass'].forEach(function (i) { $(i).value = ''; });
+        $('userForm').style.display = 'none';
+        loadUsers();
+        DK.toast({ judul: 'Tersimpan', isi: 'Pengguna baru ditambahkan.', ms: 3000 });
+      })
+      .catch(function (er) { $('uErr').textContent = er.message; });
+  });
+  $('userTbl').addEventListener('click', function (e) {
+    var pw = e.target.closest('[data-pw]'), akt = e.target.closest('[data-akt]');
+    if (pw) {
+      var p = prompt('Password baru (minimal 8 karakter):');
+      if (!p) return;
+      DK.api('/api/admin/users/' + pw.dataset.pw, { method: 'PUT', body: { password: p } })
+        .then(function () { DK.toast({ judul: 'Tersimpan', isi: 'Password diganti, sesi lama diputus.', ms: 4000 }); loadUsers(); })
+        .catch(function (er) { alert(er.message); });
+    }
+    if (akt) {
+      var ke = akt.dataset.ke === '1';
+      if (!ke && !confirm('Nonaktifkan pengguna ini? Sesinya langsung diputus.')) return;
+      DK.api('/api/admin/users/' + akt.dataset.akt, { method: 'PUT', body: { aktif: ke } })
+        .then(loadUsers)
+        .catch(function (er) { alert(er.message); });
+    }
+  });
+
+  function authErr(e) { if (e.status === 401 || e.status === 403) location.href = '/login?next=/admin'; }
   DK.requireLogin().then(function (me) {
-    if (me.role !== 'admin') { location.href = '/login.html?next=/admin.html'; return; }
+    if (me.role !== 'admin') { location.href = '/login?next=/admin'; return; }
     DK.api('/api/config').then(function (c) { $('brand').textContent = c.nama_resto.toLowerCase() + '.'; });
     view(); setInterval(function () { if (!document.querySelector('.modal-backdrop') && (location.hash || '#dashboard') === '#dashboard') loadDash(); }, 15000);
   });

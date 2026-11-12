@@ -39,12 +39,13 @@ def remind_payment(conn, menit_sebelum=5):
              AND expires_at - ? <= ? AND expires_at > ?""",
         (t, menit_sebelum * 60, t),
     ).fetchall()
+    n = 0
     for r in rows:
         sisa = max(1, (r["expires_at"] - t + 59) // 60)
-        push(conn, r["id"], "pembeli", "pengingat_bayar", "Segera selesaikan pembayaran",
-             f"Sisa waktu bayar pesanan #{kode(r['id'])} sekitar {sisa} menit lagi.",
-             f"{r['id']}:pengingat_bayar")
-    return len(rows)
+        n += push(conn, r["id"], "pembeli", "pengingat_bayar", "Segera selesaikan pembayaran",
+                  f"Sisa waktu bayar pesanan #{kode(r['id'])} sekitar {sisa} menit lagi.",
+                  f"{r['id']}:pengingat_bayar")
+    return n
 
 
 def late_alerts(conn):
@@ -55,14 +56,17 @@ def late_alerts(conn):
         "SELECT id, meja_no, paid_at FROM orders WHERE status IN ('baru','dimasak') AND paid_at IS NOT NULL AND ? - paid_at >= ?",
         (t, batas),
     ).fetchall()
+    n = 0
     for r in rows:
         mnt = (t - r["paid_at"]) // 60
-        push(conn, r["id"], "dapur", "telat", f"Terlambat · Meja {r['meja_no']}",
-             f"#{kode(r['id'])} sudah {mnt} menit sejak dibayar.", f"{r['id']}:telat")
-        push(conn, r["id"], "pembeli", "pesanan_terlambat", "Maaf, pesananmu agak lama",
-             f"Pesanan #{kode(r['id'])} masih kami kerjakan. Terima kasih sudah menunggu.",
-             f"{r['id']}:pesanan_terlambat")
-    return len(rows)
+        a = push(conn, r["id"], "dapur", "telat", f"Terlambat · Meja {r['meja_no']}",
+                 f"#{kode(r['id'])} sudah {mnt} menit sejak dibayar.", f"{r['id']}:telat")
+        b = push(conn, r["id"], "pembeli", "pesanan_terlambat", "Maaf, pesananmu agak lama",
+                 f"Pesanan #{kode(r['id'])} masih kami kerjakan. Terima kasih sudah menunggu.",
+                 f"{r['id']}:pesanan_terlambat")
+        if a or b:
+            n += 1
+    return n
 
 
 def dispatch_outbox(conn, channels=None):
@@ -75,8 +79,8 @@ def dispatch_outbox(conn, channels=None):
         (t - 3600,),
     )
     rows = conn.execute(
-        """SELECT n.id, n.tipe, n.judul, n.isi, n.created_at, o.id AS oid, o.meja_no
-           FROM notifications n JOIN orders o ON o.id = n.order_id
+        """SELECT n.id, n.tipe, n.judul, n.isi, n.created_at, n.order_id AS oid, o.meja_no
+           FROM notifications n LEFT JOIN orders o ON o.id = n.order_id
            WHERE n.audience='pembeli' AND n.ext_status='pending' ORDER BY n.id LIMIT 100"""
     ).fetchall()
     sent = 0
@@ -84,7 +88,8 @@ def dispatch_outbox(conn, channels=None):
         if not channels:
             status = "skip"
         else:
-            payload = {"kode": kode(r["oid"]), "meja": r["meja_no"], "tipe": r["tipe"],
+            payload = {"kode": kode(r["oid"]) if r["oid"] is not None else "-",
+                       "meja": r["meja_no"] or "-", "tipe": r["tipe"],
                        "judul": r["judul"], "isi": r["isi"], "at": r["created_at"]}
             ok = 0
             for ch in channels:
